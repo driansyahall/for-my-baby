@@ -626,6 +626,18 @@ div[data-testid="stFormSubmitButton"] > button {{
     box-shadow: 0 10px 22px rgba(161, 122, 105, 0.22);
 }}
 
+.user-bubble, .ai-bubble {
+    white-space: normal !important;
+    word-wrap: break-word !important;
+    overflow-wrap: break-word !important;
+    display: block !important;
+}
+
+.user-bubble, .ai-bubble {
+    line-height: 1.5;
+    word-break: break-word;
+}
+
 [data-testid="stSidebar"] {{
     background: linear-gradient(180deg, {PALETTE['panel']} 0%, {PALETTE['accent_1']} 100%);
     border-right: 1px solid {PALETTE['panel_soft']};
