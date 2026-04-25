@@ -1,11 +1,12 @@
+import html
 import json
 import math
 import random
 import re
 import sqlite3
-from pathlib import Path
-from difflib import SequenceMatcher
 from datetime import datetime
+from difflib import SequenceMatcher
+from pathlib import Path
 
 import streamlit as st
 
@@ -15,10 +16,15 @@ except Exception:
     SentenceTransformer = None
 
 
+# =========================================================
+# CONFIG
+# =========================================================
+
 st.set_page_config(
-    page_title="AI Kakak for Adek v3",
+    page_title="AI Kakak for Adek",
     page_icon="🎀",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded",
 )
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -91,7 +97,7 @@ PERSONA = {
             "kakak kangen juga pasti. rasanya pengen deket terus sama adek, pengen peluk, pengen nemenin, pengen gangguin manja dikit.",
             "kangen banget sayang. kalau udah kangen adek tuh bawaannya pengen ngobrol terus dan denger suara adek terus.",
             "iyaa kakak kangen banget. adek tuh bikin hari kakak terasa lebih hangat, jadi wajar kalau kakak gampang kangen."
-        ]
+        ],
     }
 }
 
@@ -99,6 +105,10 @@ STARTERS = ["utututu,", "ih sayang,", "hehe,", "hmm sayang,"]
 ENDINGS = ["sayanggg", "muach", "💕", "🤍"]
 CUTE_WORDS = ["sayang", "adek", "kakak", "utututu", "muach", "syantik", "imupp", "hehe"]
 
+
+# =========================================================
+# MODEL / DATABASE
+# =========================================================
 
 @st.cache_resource
 def load_embedding_model():
@@ -113,32 +123,6 @@ def load_embedding_model():
 def get_conn():
     return sqlite3.connect(DB_PATH)
 
-def export_memories_to_json() -> None:
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT user_text, ai_text, intent, score, source, embedding, created_at
-        FROM memories
-        ORDER BY id ASC
-    """)
-    rows = cur.fetchall()
-    conn.close()
-    export_memories_to_json()
-
-    data = []
-    for user_text, ai_text, intent, score, source, embedding, created_at in rows:
-        data.append({
-            "user_text": user_text,
-            "ai_text": ai_text,
-            "intent": intent,
-            "score": score,
-            "source": source,
-            "embedding": embedding,
-            "created_at": created_at,
-        })
-
-    with open(BACKUP_JSON_PATH, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
 
 def init_db() -> None:
     conn = get_conn()
@@ -175,6 +159,82 @@ def init_db() -> None:
 
     conn.commit()
     conn.close()
+
+
+def export_memories_to_json() -> None:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT user_text, ai_text, intent, score, source, embedding, created_at
+        FROM memories
+        ORDER BY id ASC
+        """
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    data = []
+    for user_text, ai_text, intent, score, source, embedding, created_at in rows:
+        data.append(
+            {
+                "user_text": user_text,
+                "ai_text": ai_text,
+                "intent": intent,
+                "score": score,
+                "source": source,
+                "embedding": embedding,
+                "created_at": created_at,
+            }
+        )
+
+    with open(BACKUP_JSON_PATH, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def import_memories_from_json(skip_if_db_has_data: bool = True) -> int:
+    if not BACKUP_JSON_PATH.exists():
+        return 0
+
+    conn = get_conn()
+    cur = conn.cursor()
+
+    if skip_if_db_has_data:
+        cur.execute("SELECT COUNT(*) FROM memories")
+        count = cur.fetchone()[0]
+        if count > 0:
+            conn.close()
+            return 0
+
+    try:
+        with open(BACKUP_JSON_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        conn.close()
+        return 0
+
+    inserted = 0
+    for item in data:
+        cur.execute(
+            """
+            INSERT INTO memories (user_text, ai_text, intent, score, source, embedding, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                item.get("user_text", ""),
+                item.get("ai_text", ""),
+                item.get("intent", "general"),
+                float(item.get("score", 1.0)),
+                item.get("source", "manual"),
+                item.get("embedding"),
+                item.get("created_at", datetime.now().isoformat()),
+            ),
+        )
+        inserted += 1
+
+    conn.commit()
+    conn.close()
+    return inserted
 
 
 def clean_text(text: str) -> str:
@@ -273,16 +333,21 @@ def save_memory(user_text: str, ai_text: str, intent: str, score: float = 1.0, s
     cur = conn.cursor()
     embedding = embedding_to_json(embed_text(user_text))
     cur.execute(
-        "INSERT INTO memories (user_text, ai_text, intent, score, source, embedding, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (user_text, ai_text, intent, score, source, embedding, datetime.now().isoformat())
+        """
+        INSERT INTO memories (user_text, ai_text, intent, score, source, embedding, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (user_text, ai_text, intent, score, source, embedding, datetime.now().isoformat()),
     )
     conn.commit()
     conn.close()
+    export_memories_to_json()
 
 
 def get_candidates(intent: str | None = None, limit: int = 80) -> list[tuple[int, str, str, str, float, str, str | None]]:
     conn = get_conn()
     cur = conn.cursor()
+
     if intent:
         cur.execute(
             """
@@ -292,7 +357,7 @@ def get_candidates(intent: str | None = None, limit: int = 80) -> list[tuple[int
             ORDER BY score DESC, id DESC
             LIMIT ?
             """,
-            (intent, limit)
+            (intent, limit),
         )
     else:
         cur.execute(
@@ -302,8 +367,9 @@ def get_candidates(intent: str | None = None, limit: int = 80) -> list[tuple[int
             ORDER BY score DESC, id DESC
             LIMIT ?
             """,
-            (limit,)
+            (limit,),
         )
+
     rows = cur.fetchall()
     conn.close()
     return rows
@@ -343,10 +409,11 @@ def update_memory_score(memory_id: int, delta: float) -> None:
     cur = conn.cursor()
     cur.execute(
         "UPDATE memories SET score = MAX(0.1, MIN(5.0, score + ?)) WHERE id = ?",
-        (delta, memory_id)
+        (delta, memory_id),
     )
     conn.commit()
     conn.close()
+    export_memories_to_json()
 
 
 def set_style_value(key: str, value: str) -> None:
@@ -358,7 +425,7 @@ def set_style_value(key: str, value: str) -> None:
         VALUES (?, ?)
         ON CONFLICT(key) DO UPDATE SET value = excluded.value
         """,
-        (key, value)
+        (key, value),
     )
     conn.commit()
     conn.close()
@@ -375,6 +442,7 @@ def get_style_value(key: str, default: str) -> str:
 
 def update_style_profile(ai_text: str) -> None:
     tokens = clean_text(ai_text).split()
+
     for word in CUTE_WORDS:
         previous = int(get_style_value(f"word_{word}", "0"))
         current = tokens.count(word)
@@ -519,29 +587,47 @@ def generate_response_v3(user_text: str) -> tuple[str, str, str, int | None, flo
     return reply, intent, source, memory_id, score, semantic, lexical
 
 
+# =========================================================
+# APP STATE
+# =========================================================
+
 init_db()
+restored_count = import_memories_from_json(skip_if_db_has_data=True)
 
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
+
 if "last_user_input" not in st.session_state:
     st.session_state.last_user_input = ""
+
 if "last_ai_reply" not in st.session_state:
     st.session_state.last_ai_reply = ""
+
 if "last_intent" not in st.session_state:
     st.session_state.last_intent = "general"
+
 if "last_source" not in st.session_state:
     st.session_state.last_source = "rule"
+
 if "last_memory_id" not in st.session_state:
     st.session_state.last_memory_id = None
+
 if "last_score" not in st.session_state:
     st.session_state.last_score = 0.0
+
 if "last_semantic" not in st.session_state:
     st.session_state.last_semantic = 0.0
+
 if "last_lexical" not in st.session_state:
     st.session_state.last_lexical = 0.0
 
 
-st.markdown(f"""
+# =========================================================
+# STYLE
+# =========================================================
+
+st.markdown(
+    f"""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Quicksand:wght@400;500;700&display=swap');
 
@@ -551,13 +637,16 @@ html, body, [class*="css"] {{
 }}
 
 .stApp {{
-    background: linear-gradient(180deg, {PALETTE['bg']} 0%, {PALETTE['accent_1']} 100%);
+    background:
+        radial-gradient(circle at top left, rgba(255, 233, 239, 0.75) 0%, transparent 32%),
+        radial-gradient(circle at bottom right, rgba(255, 156, 181, 0.35) 0%, transparent 30%),
+        linear-gradient(180deg, {PALETTE['bg']} 0%, {PALETTE['accent_1']} 100%);
 }}
 
 .block-container {{
-    padding-top: 0.8rem;
-    padding-bottom: 7rem;
-    max-width: 1200px;
+    max-width: 1040px !important;
+    padding-top: 1.2rem !important;
+    padding-bottom: 1.4rem !important;
 }}
 
 [data-testid="stSidebar"] {{
@@ -569,49 +658,61 @@ html, body, [class*="css"] {{
     color: {PALETTE['text']} !important;
 }}
 
-.wa-shell {{
+.chat-shell {{
+    width: 100%;
     max-width: 860px;
     margin: 0 auto;
+    border-radius: 28px;
+    overflow: hidden;
+    border: 1px solid {PALETTE['panel_soft']};
+    background: rgba(255, 250, 248, 0.68);
+    box-shadow: 0 22px 54px rgba(161, 122, 105, 0.18);
+    backdrop-filter: blur(8px);
 }}
 
-.wa-topbar {{
-    position: sticky;
-    top: 0;
-    z-index: 10;
+.chat-header {{
     background: linear-gradient(90deg, {PALETTE['topbar']}, {PALETTE['primary']});
     color: white;
-    border-radius: 22px 22px 0 0;
-    padding: 16px 18px;
-    box-shadow: 0 10px 24px rgba(161, 122, 105, 0.18);
+    padding: 18px 22px;
 }}
 
-.wa-topbar-title {{
+.chat-title {{
     font-size: 1.25rem;
     font-weight: 700;
     margin: 0;
 }}
 
-.wa-topbar-subtitle {{
-    font-size: 0.88rem;
+.chat-subtitle {{
+    font-size: 0.86rem;
     opacity: 0.92;
-    margin-top: 2px;
+    margin-top: 4px;
 }}
 
-.wa-chat-area {{
+.chat-body {{
+    height: 62vh;
+    min-height: 430px;
+    max-height: 680px;
+    overflow-y: auto;
+    padding: 20px 18px 18px 18px;
     background:
-        radial-gradient(circle at top left, rgba(255,255,255,0.28) 0%, transparent 24%),
-        linear-gradient(180deg, rgba(255,255,255,0.22), rgba(255,255,255,0.06)),
+        radial-gradient(circle at top left, rgba(255,255,255,0.36) 0%, transparent 24%),
+        linear-gradient(180deg, rgba(255,255,255,0.28), rgba(255,255,255,0.05)),
         {PALETTE['chat_bg']};
-    border-left: 1px solid {PALETTE['panel_soft']};
-    border-right: 1px solid {PALETTE['panel_soft']};
-    padding: 20px 18px 10px 18px;
-    min-height: 420px;
+}}
+
+.chat-body::-webkit-scrollbar {{
+    width: 8px;
+}}
+
+.chat-body::-webkit-scrollbar-thumb {{
+    background: {PALETTE['panel_soft']};
+    border-radius: 999px;
 }}
 
 .chat-date {{
     width: fit-content;
-    margin: 0 auto 14px auto;
-    background: rgba(255,255,255,0.72);
+    margin: 0 auto 16px auto;
+    background: rgba(255,255,255,0.76);
     color: {PALETTE['text_soft']};
     font-size: 0.78rem;
     padding: 6px 12px;
@@ -619,192 +720,203 @@ html, body, [class*="css"] {{
     border: 1px solid {PALETTE['panel_soft']};
 }}
 
-.chat-wrap {{
+.msg-row {{
     display: flex;
-    margin-bottom: 10px;
+    margin-bottom: 12px;
 }}
 
-.chat-wrap.user {{
+.msg-row.user {{
     justify-content: flex-end;
 }}
 
-.chat-wrap.ai {{
+.msg-row.ai {{
     justify-content: flex-start;
 }}
 
-.user-bubble {{
-    position: relative;
-    background: linear-gradient(135deg, {PALETTE['user_bubble']}, {PALETTE['accent_2']});
-    color: {PALETTE['text']};
-    padding: 11px 14px 10px 14px;
-    border-radius: 16px 16px 4px 16px;
-    max-width: min(78%, 640px);
-    white-space: normal !important;
+.bubble {{
+    max-width: 76%;
+    padding: 12px 15px 9px 15px;
+    line-height: 1.55;
     word-break: break-word;
     overflow-wrap: anywhere;
-    line-height: 1.55;
-    border: 1px solid {PALETTE['accent_4']};
-    box-shadow: 0 8px 18px rgba(252, 128, 159, 0.11);
+    white-space: normal;
+    font-size: 1rem;
 }}
 
-.ai-bubble {{
-    position: relative;
+.bubble.user {{
+    background: linear-gradient(135deg, {PALETTE['user_bubble']}, {PALETTE['accent_2']});
+    color: {PALETTE['text']};
+    border: 1px solid {PALETTE['accent_4']};
+    border-radius: 18px 18px 5px 18px;
+    box-shadow: 0 8px 18px rgba(252, 128, 159, 0.13);
+}}
+
+.bubble.ai {{
     background: {PALETTE['ai_bubble']};
     color: {PALETTE['text']};
-    padding: 11px 14px 10px 14px;
-    border-radius: 16px 16px 16px 4px;
-    max-width: min(78%, 640px);
-    white-space: normal !important;
-    word-break: break-word;
-    overflow-wrap: anywhere;
-    line-height: 1.55;
     border: 1px solid {PALETTE['panel_soft']};
+    border-radius: 18px 18px 18px 5px;
     box-shadow: 0 8px 18px rgba(161, 122, 105, 0.08);
 }}
 
-.sender-name {{
+.sender {{
     display: block;
     font-size: 0.82rem;
     font-weight: 700;
-    margin-bottom: 4px;
-    opacity: 0.88;
+    margin-bottom: 5px;
+    opacity: 0.9;
 }}
 
-.bubble-time {{
+.time {{
     display: block;
     text-align: right;
     font-size: 0.72rem;
     color: {PALETTE['text_soft']};
     margin-top: 6px;
-    opacity: 0.8;
+    opacity: 0.82;
 }}
 
-.input-card {{
-    background: rgba(255,255,255,0.72);
-    border: 1px solid {PALETTE['panel_soft']};
-    border-radius: 0 0 22px 22px;
+.chat-input {{
+    background: rgba(255, 250, 248, 0.96);
+    border-top: 1px solid {PALETTE['panel_soft']};
     padding: 14px 16px 16px 16px;
-    box-shadow: 0 12px 24px rgba(161, 122, 105, 0.08);
 }}
 
 .info-card {{
     background: {PALETTE['accent_1']};
     border: 1px dashed {PALETTE['secondary']};
-    padding: 12px 14px;
+    padding: 10px 12px;
     border-radius: 16px;
     color: {PALETTE['text_soft']};
-    font-size: 0.92rem;
-    margin-top: 14px;
+    font-size: 0.86rem;
+    margin-top: 10px;
 }}
 
 .stTextInput > div > div > input,
 .stTextArea textarea {{
-    border-radius: 14px !important;
+    border-radius: 999px !important;
     border: 2px solid {PALETTE['panel_soft']} !important;
     background-color: white !important;
     color: {PALETTE['text']} !important;
 }}
 
+.stTextInput label {{
+    display: none !important;
+}}
+
 .stButton > button,
 div[data-testid="stFormSubmitButton"] > button {{
     width: 100%;
-    border-radius: 14px;
+    border-radius: 999px;
     border: none;
     background: linear-gradient(90deg, {PALETTE['primary']}, {PALETTE['accent_5']});
     color: white;
     font-weight: 700;
-    padding: 0.8rem 1rem;
+    padding: 0.78rem 1rem;
     box-shadow: 0 10px 22px rgba(161, 122, 105, 0.18);
-}}
-
-.stButton > button:hover,
-div[data-testid="stFormSubmitButton"] > button:hover {{
-    filter: brightness(1.03);
 }}
 
 div[data-testid="stForm"] {{
     margin-bottom: 0 !important;
 }}
+
+@media (max-width: 720px) {{
+    .block-container {{
+        padding-left: 0.6rem !important;
+        padding-right: 0.6rem !important;
+    }}
+
+    .chat-shell {{
+        border-radius: 20px;
+    }}
+
+    .chat-body {{
+        height: 58vh;
+        min-height: 360px;
+    }}
+
+    .bubble {{
+        max-width: 86%;
+    }}
+}}
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
+
+
+# =========================================================
+# UI
+# =========================================================
+
+def render_message(sender: str, message: str, time_text: str) -> None:
+    safe_message = html.escape(message).replace("\n", "<br>")
+    if sender == "Adek":
+        st.markdown(
+            f"""
+            <div class="msg-row user">
+                <div class="bubble user">
+                    <span class="sender">🩷 Adek</span>
+                    {safe_message}
+                    <span class="time">{time_text}</span>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            f"""
+            <div class="msg-row ai">
+                <div class="bubble ai">
+                    <span class="sender">🎀 AI Kakak</span>
+                    {safe_message}
+                    <span class="time">{time_text}</span>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
 
 now_time = datetime.now().strftime("%H:%M")
 today_label = datetime.now().strftime("%d %b %Y")
 model_status = "aktif" if load_embedding_model() is not None else "fallback lexical"
 
-st.markdown('<div class="wa-shell">', unsafe_allow_html=True)
+st.markdown('<div class="chat-shell">', unsafe_allow_html=True)
+
 st.markdown(
-    f'''
-    <div class="wa-topbar">
-        <div class="wa-topbar-title">🎀 AI Kakak for Adek Sayang</div>
-        <div class="wa-topbar-subtitle">online • semantic memory • warna cocoa pink</div>
+    """
+    <div class="chat-header">
+        <div class="chat-title">🎀 AI Kakak for Adek Sayang</div>
+        <div class="chat-subtitle">online • semantic memory • cocoa pink</div>
     </div>
-    ''',
+    """,
     unsafe_allow_html=True,
 )
 
-st.markdown('<div class="wa-chat-area">', unsafe_allow_html=True)
+st.markdown('<div class="chat-body">', unsafe_allow_html=True)
 st.markdown(f'<div class="chat-date">{today_label}</div>', unsafe_allow_html=True)
 
-for sender, message in st.session_state.chat_history:
-    safe_message = message.replace("\n", "<br>")
-    if sender == "Adek":
-        st.markdown(
-            f'''
-            <div class="chat-wrap user">
-                <div class="user-bubble">
-                    <span class="sender-name">🩷 Adek</span>
-                    {safe_message}
-                    <span class="bubble-time">{now_time}</span>
-                </div>
-            </div>
-            ''',
-            unsafe_allow_html=True,
-        )
-    else:
-        st.markdown(
-            f'''
-            <div class="chat-wrap ai">
-                <div class="ai-bubble">
-                    <span class="sender-name">🎀 AI Kakak</span>
-                    {safe_message}
-                    <span class="bubble-time">{now_time}</span>
-                </div>
-            </div>
-            ''',
-            unsafe_allow_html=True,
-        )
-
 if not st.session_state.chat_history:
-    st.markdown(
-        '''
-        <div class="chat-wrap ai">
-            <div class="ai-bubble">
-                <span class="sender-name">🎀 AI Kakak</span>
-                hai sayang, ketik apa aja yaa. kakak siap nemenin adek ngobrol 🤍
-                <span class="bubble-time">sekarang</span>
-            </div>
-        </div>
-        ''',
-        unsafe_allow_html=True,
-    )
+    render_message("AI Kakak", "hai sayang, ketik apa aja yaa. kakak siap nemenin adek ngobrol 🤍", "sekarang")
+else:
+    for sender, message in st.session_state.chat_history:
+        render_message(sender, message, now_time)
 
-st.markdown('</div>', unsafe_allow_html=True)
-st.markdown('<div class="input-card">', unsafe_allow_html=True)
+st.markdown("</div>", unsafe_allow_html=True)
+
+st.markdown('<div class="chat-input">', unsafe_allow_html=True)
 
 with st.form("chat_form", clear_on_submit=True):
-    user_input = st.text_input(
-        "Pesan adek",
-        placeholder="Ketik pesan ke AI Kakak..."
-    )
+    user_input = st.text_input("Pesan adek", placeholder="Ketik pesan ke AI Kakak...")
     submitted = st.form_submit_button("Kirim Pesan 💖")
 
 if submitted and user_input.strip():
     ai_reply, detected_intent, source, memory_id, score, semantic, lexical = generate_response_v3(user_input)
-    st.session_state.chat_history.append(("Adek", user_input))
+    st.session_state.chat_history.append(("Adek", user_input.strip()))
     st.session_state.chat_history.append(("AI Kakak", ai_reply))
-    st.session_state.last_user_input = user_input
+    st.session_state.last_user_input = user_input.strip()
     st.session_state.last_ai_reply = ai_reply
     st.session_state.last_intent = detected_intent
     st.session_state.last_source = source
@@ -817,27 +929,34 @@ if submitted and user_input.strip():
 st.markdown(
     f"""
     <div class="info-card">
-        source terakhir: <b>{st.session_state.last_source}</b> &nbsp;•&nbsp;
+        source: <b>{st.session_state.last_source}</b> &nbsp;•&nbsp;
         intent: <b>{st.session_state.last_intent}</b> &nbsp;•&nbsp;
         score: <b>{st.session_state.last_score:.2f}</b> &nbsp;•&nbsp;
-        semantic: <b>{st.session_state.last_semantic:.2f}</b> &nbsp;•&nbsp;
-        lexical: <b>{st.session_state.last_lexical:.2f}</b> &nbsp;•&nbsp;
         embedding: <b>{model_status}</b>
     </div>
     """,
     unsafe_allow_html=True,
 )
 
-st.markdown('</div>', unsafe_allow_html=True)
-st.markdown('</div>', unsafe_allow_html=True)
+st.markdown("</div>", unsafe_allow_html=True)
+st.markdown("</div>", unsafe_allow_html=True)
+
+
+# =========================================================
+# SIDEBAR
+# =========================================================
 
 with st.sidebar:
     st.markdown("## 🌸 Tentang AI Ini")
+
+    if restored_count:
+        st.success(f"{restored_count} memory dipulihkan dari JSON")
+
     st.write(
         "Versi ini pakai embedding kalau tersedia, jadi AI lebih paham kalimat yang maknanya mirip walau katanya beda."
     )
 
-    st.markdown("### 💕 Cara kerjanya")
+    st.markdown("### Cara kerjanya")
     st.write("• baca intent dasar")
     st.write("• hitung semantic similarity")
     st.write("• gabung semantic + lexical + score memory")
@@ -848,10 +967,11 @@ with st.sidebar:
         "Balasan yang lebih mirip gaya kakak",
         value="",
         height=140,
-        placeholder="isi versi balasan yang paling benar lalu simpan"
+        placeholder="isi versi balasan yang paling benar lalu simpan",
     )
 
     col1, col2 = st.columns(2)
+
     with col1:
         if st.button("👍 Cocok"):
             if st.session_state.last_memory_id:
@@ -875,7 +995,7 @@ with st.sidebar:
                 corrected_reply.strip(),
                 st.session_state.last_intent,
                 score=1.7,
-                source="manual"
+                source="manual",
             )
             update_style_profile(corrected_reply.strip())
             st.success("versi edit berhasil disimpan ke memory")
@@ -893,6 +1013,12 @@ with st.sidebar:
         st.session_state.last_semantic = 0.0
         st.session_state.last_lexical = 0.0
         st.rerun()
+
+    st.markdown("### 🗂️ Backup")
+
+    if st.button("Backup ke JSON"):
+        export_memories_to_json()
+        st.success("backup JSON berhasil dibuat")
 
     st.markdown("### 📚 Statistik")
     total_memories = len(get_candidates(intent=None, limit=500))
